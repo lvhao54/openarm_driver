@@ -85,8 +85,9 @@ python samples/dual_arm_parallel.py --config openarm_pedestal \
 its own worker thread. Their configured startup and shutdown trajectories run
 concurrently. The target loop uses a shared clock and barriers at each step.
 The same target, interface, frequency and duration options apply; omitted targets
-hold the measured positions after startup. `--sync-timeout` controls how long a
-worker waits for its peer at a barrier (default: 30 seconds).
+hold the last position command dispatched by the startup trajectory. This keeps
+the startup holding torque while motor feedback catches up. `--sync-timeout`
+controls how long a worker waits for its peer at a barrier (default: 30 seconds).
 
 A failure or Ctrl+C signals cancellation to both workers. An extra application
 safety checker rejects subsequent commands, including commands inside the

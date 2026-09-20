@@ -48,6 +48,13 @@ def rig(monkeypatch):
             self.safety_stop_reason = None
             self.safety_checker = NullChecker()
             self.last_command = np.full(8, 0.2 if side == "left_arm" else -0.3)
+            self.startup_command = self.last_command.copy()
+            # Loaded joints need a position error to generate holding torque.
+            # Feedback must not be mistaken for the last dispatched target.
+            self.measured_position = self.last_command - np.array(
+                [0.0, 0.05, 0.0, 0.08, 0.0, 0.0, 0.0, 0.0]
+            )
+            self.commands = []
             self.openarm = SimpleNamespace(disable_all=lambda: self.action("disable"))
             self.action("create")
             state.arms[side] = self
@@ -89,12 +96,13 @@ def rig(monkeypatch):
 
         def fetch_position(self):
             self.action("fetch")
-            return self.last_command.copy()
+            return self.measured_position.copy()
 
         def send_position(self, target):
             if not self.action("send") or not self.check(target):
                 return False
             self.last_command = target.copy()
+            self.commands.append(target.copy())
             return True
 
         def stop(self):
@@ -141,10 +149,24 @@ def test_all_phases_overlap_and_each_driver_has_one_owner(rig):
     assert not events(rig, "disable")
 
 
-def test_default_targets_hold_after_parallel_startup(rig):
-    assert parallel.main(["--duration", "0.005"]) == 0
-    np.testing.assert_allclose(rig.arms["left_arm"].last_command, 0.2)
-    np.testing.assert_allclose(rig.arms["right_arm"].last_command, -0.3)
+def test_default_targets_preserve_start_command_with_tracking_error(rig):
+    assert parallel.main(["--duration", "0.04"]) == 0
+    for arm in rig.arms.values():
+        assert not np.array_equal(arm.measured_position, arm.startup_command)
+        assert len(arm.commands) == 2
+        for command in arm.commands:
+            np.testing.assert_array_equal(command, arm.startup_command)
+
+
+def test_targets_interpolate_from_start_command_with_tracking_error(rig):
+    assert parallel.main(args()) == 0
+    for side, target in (("left_arm", 0.3), ("right_arm", -0.5)):
+        arm = rig.arms[side]
+        assert len(arm.commands) == 2
+        np.testing.assert_allclose(
+            arm.commands[0], arm.startup_command + (target - arm.startup_command) / 2
+        )
+        np.testing.assert_allclose(arm.commands[1], target)
 
 
 @pytest.mark.parametrize("side", ["left_arm", "right_arm"])
@@ -223,19 +245,20 @@ def test_main_thread_interrupt_cancels_workers(rig, monkeypatch):
 def test_timeout_aborts_waiters_and_disables_started_arm(rig, monkeypatch):
     create = parallel.SingleArmDriver
 
-    def with_slow_fetch(*positional, **keywords):
+    def with_slow_start(*positional, **keywords):
         arm = create(*positional, **keywords)
-        original_fetch = arm.fetch_position
+        original_start = arm.start
         if arm.arm_side == "right_arm":
 
-            def fetch():
+            def start():
+                result = original_start()
                 time.sleep(0.05)
-                return original_fetch()
+                return result
 
-            arm.fetch_position = fetch
+            arm.start = start
         return arm
 
-    monkeypatch.setattr(parallel, "SingleArmDriver", with_slow_fetch)
+    monkeypatch.setattr(parallel, "SingleArmDriver", with_slow_start)
     with pytest.raises(TimeoutError, match="waiting for the other arm"):
         parallel.main(["--sync-timeout", "0.02", "--duration", "0.01"])
     assert sorted(events(rig, "disable")) == ["left_arm", "right_arm"]

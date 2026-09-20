@@ -70,7 +70,11 @@ def positive_float(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="openarm_pedestal", help="bundled configuration name or YAML path")
+    parser.add_argument(
+        "--config",
+        default="openarm_pedestal",
+        help="bundled configuration name or YAML path",
+    )
     parser.add_argument("--left-can-interface")
     parser.add_argument("--right-can-interface")
     parser.add_argument("--hz", type=positive_float, default=50.0)
@@ -148,10 +152,15 @@ def main(argv=None) -> int:
                 raise RuntimeError(f"{side}: startup failed: {arm.safety_stop_reason}")
             check_cancelled()
 
-            initial = np.asarray(arm.fetch_position(), dtype=float).copy()
+            # Continue from the last target that was actually dispatched by
+            # the startup trajectory. Feedback can lag that target while a
+            # loaded joint is still settling; using the lagging measurement as
+            # the next target would remove the position error that provides
+            # holding torque and can let the arm drop.
+            initial = np.asarray(arm.last_command, dtype=float).copy()
             if initial.shape != (8,) or not np.all(np.isfinite(initial)):
                 raise ValueError(
-                    f"{side}: measured positions must be finite with shape (8,)"
+                    f"{side}: last startup command must be finite with shape (8,)"
                 )
             target = initial.copy() if requested is None else np.array(requested)
             motion.wait()
