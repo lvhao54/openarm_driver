@@ -36,6 +36,71 @@ finally:
     arm.stop()
 ```
 
+## Dual-arm control
+
+Use two ordinary `SingleArmDriver` instances in one application loop. The
+[sample script](samples/dual_arm_motion.py) uses the existing driver without
+subclassing or changing its implementation:
+
+```bash
+python samples/dual_arm_motion.py --config openarm_pedestal
+```
+
+This enables both arms, runs each arm's configured startup trajectory in sequence,
+holds their measured positions for two seconds, then runs each configured stop
+trajectory in sequence. The arms can move during startup and shutdown. Set
+`--left-target` and/or `--right-target` to eight absolute positions in radians
+(seven joints followed by the gripper) to move during the shared loop. An omitted
+target holds that arm's position after startup. Use `--hz` and `--duration` to set
+the command frequency and trajectory duration, and `--left-can-interface` /
+`--right-can-interface` to override the configured CAN interfaces.
+
+The core loop computes both targets from the same trajectory progress and calls
+`left.send_position(...)`, then `right.send_position(...)`, checking each return
+value. Each call includes its own safety checks, dispatch and feedback read.
+Calling `left.smooth_move(...)` followed by `right.smooth_move(...)` would execute
+the two trajectories one after the other instead.
+
+If startup or a position command returns `False`, or an operation raises an
+exception (including Ctrl+C), the script stops the loop and attempts to disable
+both arms whose startup was attempted, without a return trajectory. Disable
+failures are logged without skipping the other arm or hiding the original error.
+Disabling removes holding torque. The script does not automatically resume.
+
+The writes are sequential: a right-arm rejection or send failure can occur after
+the left target was already sent. Independent safety clamping can produce
+different progress on each arm; the script warns if the final dispatched command
+differs from the requested endpoint. It does not verify physical arrival, provide
+hardware synchronization, or check collisions between the arms.
+
+For overlapping startup, motion, and shutdown, use the threaded demo:
+
+```bash
+python samples/dual_arm_parallel.py --config openarm_pedestal \
+  --left-target 0 0 0 1.57 0 0 0 0 \
+  --right-target 0 0 0 1.57 0 0 0 0
+```
+
+`dual_arm_parallel.py` gives each unchanged `SingleArmDriver` and CAN interface
+its own worker thread. Their configured startup and shutdown trajectories run
+concurrently. The target loop uses a shared clock and barriers at each step.
+The same target, interface, frequency and duration options apply; omitted targets
+hold the measured positions after startup. `--sync-timeout` controls how long a
+worker waits for its peer at a barrier (default: 30 seconds).
+
+A failure or Ctrl+C signals cancellation to both workers. An extra application
+safety checker rejects subsequent commands, including commands inside the
+original startup and shutdown trajectories; the existing safety checks remain
+active. Each worker whose startup was attempted handles its own disable, and the
+main thread waits for cleanup. Disable errors are logged, and the first failure
+is preserved. Cancellation is cooperative: it cannot interrupt an in-flight or
+blocked native CAN call, and disabling may fail if the interface is unavailable.
+
+Calls still have ordinary operating-system and CAN scheduling skew; this is
+concurrent software control, not hardware-synchronized or atomic dispatch.
+Independent safety clamping and physical tracking errors can still give the arms
+different progress. The two drivers must use separate CAN interfaces.
+
 ## Config
 
 Please refer to the [default configuration](src/openarm_driver/configs/openarm_cell.yaml).
